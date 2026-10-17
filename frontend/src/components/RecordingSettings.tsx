@@ -113,6 +113,19 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     }
   };
 
+  const handleChangeFolder = async () => {
+    try {
+      const folder = await invoke<string | null>('select_recording_folder');
+      if (!folder) return;
+      const newPreferences = { ...preferences, save_folder: folder };
+      setPreferences(newPreferences);
+      await savePreferences(newPreferences);
+    } catch (error) {
+      console.error('Failed to change recordings folder:', error);
+      toast.error('Failed to change folder');
+    }
+  };
+
   const handleNotificationToggle = async (enabled: boolean) => {
     try {
       setShowRecordingNotification(enabled);
@@ -193,13 +206,25 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             <div className="text-sm text-gray-600 mb-3 break-all">
               {preferences.save_folder || 'Default folder'}
             </div>
-            <button
-              onClick={handleOpenFolder}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={handleOpenFolder}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+              >
+                <FolderOpen className="w-4 h-4" />
+                Open Folder
+              </button>
+              <button
+                onClick={handleChangeFolder}
+                disabled={saving}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+              >
+                Change Folder
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              New recordings go to this folder. Existing recordings stay where they are.
+            </p>
           </div>
 
           <div className="p-4 border rounded-lg bg-blue-50">

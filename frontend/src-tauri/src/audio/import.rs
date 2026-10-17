@@ -340,7 +340,10 @@ async fn run_import<R: Runtime>(
     }
 
     // Create meeting folder
-    let base_folder = get_default_recordings_folder();
+    let base_folder = super::recording_preferences::load_recording_preferences(&app)
+        .await
+        .map(|prefs| prefs.save_folder)
+        .unwrap_or_else(|_| get_default_recordings_folder());
     let meeting_folder = create_meeting_folder(&base_folder, &title, false)?;
 
     // Copy audio file to meeting folder
