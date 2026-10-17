@@ -266,13 +266,19 @@ pub async fn open_recordings_folder<R: Runtime>(app: AppHandle<R>) -> Result<(),
 
 #[tauri::command]
 pub async fn select_recording_folder<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    // Use Tauri's dialog to select folder
-    // For now, return None - this would need to be implemented with tauri-plugin-dialog
-    // when it's available in the Cargo.toml
-    warn!("Folder selection not yet implemented - using dialog plugin");
-    Ok(None)
+    use tauri_plugin_dialog::DialogExt;
+
+    let folder = app.dialog().file().blocking_pick_folder();
+    match folder {
+        Some(path) => {
+            let path_str = path.to_string();
+            info!("User selected recordings folder: {}", path_str);
+            Ok(Some(path_str))
+        }
+        None => Ok(None),
+    }
 }
 
 // Backend selection commands

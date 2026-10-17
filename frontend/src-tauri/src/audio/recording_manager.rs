@@ -514,6 +514,11 @@ impl RecordingManager {
         self.recording_saver.set_meeting_name(name);
     }
 
+    /// Set the base folder that meeting folders are created in
+    pub fn set_save_folder(&mut self, folder: std::path::PathBuf) {
+        self.recording_saver.set_save_folder(folder);
+    }
+
     /// Add a structured transcript segment to be saved later
     pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
         self.recording_saver.add_transcript_segment(segment);
