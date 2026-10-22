@@ -51,6 +51,7 @@ pub struct RecordingSaver {
     incremental_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
+    save_folder: PathBuf,
     metadata: Option<MeetingMetadata>,
     transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
     is_saving: Arc<Mutex<bool>>,
@@ -62,6 +63,7 @@ impl RecordingSaver {
             incremental_saver: None,
             meeting_folder: None,
             meeting_name: None,
+            save_folder: super::recording_preferences::get_default_recordings_folder(),
             metadata: None,
             transcript_segments: Arc::new(Mutex::new(Vec::new())),
             is_saving: Arc::new(Mutex::new(false)),
@@ -73,6 +75,11 @@ impl RecordingSaver {
         self.meeting_name = name;
     }
 
+    /// Set the base folder that meeting folders are created in
+    pub fn set_save_folder(&mut self, folder: PathBuf) {
+        self.save_folder = folder;
+    }
+
     /// Set device information in metadata
     pub fn set_device_info(&mut self, mic_name: Option<String>, sys_name: Option<String>) {
         if let Some(ref mut metadata) = self.metadata {
@@ -82,8 +89,8 @@ impl RecordingSaver {
             // Write updated metadata to disk if folder exists
             if let Some(folder) = &self.meeting_folder {
                 let metadata_clone = metadata.clone();
-                if let Err(e) = self.write_metadata(folder, &metadata_clone) {
-                    warn!("Failed to update metadata with device info: {}", e);
+                if let Err(_) = self.write_metadata(folder, &metadata_clone) {
+                    warn!("Failed to update metadata with device info");
                 }
             }
         }
@@ -110,8 +117,8 @@ impl RecordingSaver {
 
         // NEW: Save incrementally to disk
         if let Some(folder) = &self.meeting_folder {
-            if let Err(e) = self.write_transcripts_json(folder) {
-                warn!("Failed to write incremental transcript update: {}", e);
+            if let Err(_) = self.write_transcripts_json(folder) {
+                warn!("Failed to write incremental transcript update");
             }
         }
     }
@@ -151,8 +158,8 @@ impl RecordingSaver {
             if let Some(name) = self.meeting_name.clone() {
                 match self.initialize_meeting_folder(&name, true) {
                     Ok(()) => info!("Successfully initialized meeting folder with checkpoints"),
-                    Err(e) => {
-                        error!("Failed to initialize meeting folder: {}", e);
+                    Err(_) => {
+                        error!("Failed to initialize recording storage");
                         // Continue anyway - will use fallback flat structure
                     }
                 }
@@ -163,8 +170,8 @@ impl RecordingSaver {
             if let Some(name) = self.meeting_name.clone() {
                 match self.initialize_meeting_folder(&name, false) {
                     Ok(()) => info!("Successfully initialized meeting folder (transcripts only)"),
-                    Err(e) => {
-                        error!("Failed to initialize meeting folder: {}", e);
+                    Err(_) => {
+                        error!("Failed to initialize recording storage");
                     }
                 }
             }
@@ -195,8 +202,8 @@ impl RecordingSaver {
                     // Add chunk to incremental saver
                     if let Some(saver_arc) = &incremental_saver_arc {
                         let mut saver_guard = saver_arc.lock().await;
-                        if let Err(e) = saver_guard.add_chunk(chunk) {
-                            error!("Failed to add chunk to incremental saver: {}", e);
+                        if saver_guard.add_chunk(chunk).is_err() {
+                            error!("Failed to add chunk to incremental saver");
                         }
                     } else {
                         error!("Incremental saver not available while accumulating");
@@ -222,17 +229,14 @@ impl RecordingSaver {
     /// * `meeting_name` - Name of the meeting
     /// * `create_checkpoints` - Whether to create .checkpoints/ directory and IncrementalAudioSaver
     fn initialize_meeting_folder(&mut self, meeting_name: &str, create_checkpoints: bool) -> Result<()> {
-        // Load preferences to get base recordings folder
-        let base_folder = super::recording_preferences::get_default_recordings_folder();
-
         // Create meeting folder structure (with or without .checkpoints/ subdirectory)
-        let meeting_folder = create_meeting_folder(&base_folder, meeting_name, create_checkpoints)?;
+        let meeting_folder = create_meeting_folder(&self.save_folder, meeting_name, create_checkpoints)?;
 
         // Only initialize incremental saver if checkpoints are needed (auto_save is true)
         if create_checkpoints {
             let incremental_saver = IncrementalAudioSaver::new(meeting_folder.clone(), 48000)?;
             self.incremental_saver = Some(Arc::new(AsyncMutex::new(incremental_saver)));
-            info!("✅ Incremental audio saver initialized for meeting: {}", meeting_name);
+            info!("Incremental audio saver initialized");
         } else {
             info!("⚠️  Skipped incremental audio saver (auto-save disabled)");
         }
@@ -309,21 +313,20 @@ impl RecordingSaver {
         // Write to temp file with error handling
         std::fs::write(&temp_path, &json_string)
             .map_err(|e| {
-                error!("Failed to write transcript temp file to {}: {}", temp_path.display(), e);
+                error!("Failed to write transcript temp file");
                 anyhow::anyhow!("Failed to write temp file: {}", e)
             })?;
 
         // Verify temp file was written correctly
         if !temp_path.exists() {
-            error!("Temp transcript file does not exist after write: {}", temp_path.display());
+            error!("Temp transcript file does not exist after write");
             return Err(anyhow::anyhow!("Temp file verification failed"));
         }
 
         // Atomic rename
         std::fs::rename(&temp_path, &transcript_path)
             .map_err(|e| {
-                error!("Failed to rename transcript file from {} to {}: {}",
-                       temp_path.display(), transcript_path.display(), e);
+                error!("Failed to replace transcript file");
                 anyhow::anyhow!("Failed to rename transcript file: {}", e)
             })?;
 
@@ -378,11 +381,11 @@ impl RecordingSaver {
             let mut saver = saver_arc.lock().await;
             match saver.finalize().await {
                 Ok(path) => {
-                    info!("✅ Successfully finalized audio: {}", path.display());
+                    info!("Successfully finalized audio");
                     path
                 }
                 Err(e) => {
-                    error!("❌ Failed to finalize incremental saver: {}", e);
+                    error!("Failed to finalize incremental saver");
                     return Err(format!("Failed to finalize audio: {}", e));
                 }
             }
@@ -394,17 +397,17 @@ impl RecordingSaver {
         // Save final transcripts.json with validation
         if let Some(folder) = &self.meeting_folder {
             if let Err(e) = self.write_transcripts_json(folder) {
-                error!("❌ Failed to write final transcripts: {}", e);
+                error!("Failed to write final transcripts");
                 return Err(format!("Failed to save transcripts: {}", e));
             }
 
             // Verify transcripts were written correctly
             let transcript_path = folder.join("transcripts.json");
             if !transcript_path.exists() {
-                error!("❌ Transcript file was not created at: {}", transcript_path.display());
+                error!("Transcript file was not created");
                 return Err("Transcript file verification failed".to_string());
             }
-            info!("✅ Transcripts saved and verified at: {}", transcript_path.display());
+            info!("Transcripts saved and verified");
         }
 
         // Update metadata to completed status with actual recording duration
@@ -423,7 +426,7 @@ impl RecordingSaver {
             });
 
             if let Err(e) = self.write_metadata(folder, &metadata) {
-                error!("❌ Failed to update metadata to completed: {}", e);
+                error!("Failed to update metadata to completed");
                 return Err(format!("Failed to update metadata: {}", e));
             }
 

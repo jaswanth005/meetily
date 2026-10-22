@@ -309,8 +309,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     meeting_name: Option<String>,
 ) -> Result<(), String> {
     info!(
-        "Starting recording with default devices, meeting: {:?}",
-        meeting_name
+        "Starting recording with default devices; meeting_name_configured={}",
+        meeting_name.is_some()
     );
 
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
@@ -353,16 +353,16 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     })).map_err(|e| e.to_string())?;
 
     // Load recording preferences to get auto_save AND device preferences
-    let (auto_save, preferred_mic_name, preferred_system_name) =
+    let (auto_save, save_folder, preferred_mic_name, preferred_system_name) =
         match super::recording_preferences::load_recording_preferences(&app).await {
             Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
-                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
-                (prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device)
+                info!("📋 Loaded recording preferences: auto_save={}, save_folder={:?}, preferred_mic={:?}, preferred_system={:?}",
+                      prefs.auto_save, prefs.save_folder, prefs.preferred_mic_device, prefs.preferred_system_device);
+                (prefs.auto_save, prefs.save_folder, prefs.preferred_mic_device, prefs.preferred_system_device)
             }
             Err(e) => {
                 warn!("Failed to load recording preferences, using defaults: {}", e);
-                (true, None, None)
+                (true, super::recording_preferences::get_default_recordings_folder(), None, None)
             }
         };
 
@@ -382,6 +382,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Create new recording manager only after startup validation succeeds
     let mut manager = RecordingManager::new();
+    manager.set_save_folder(save_folder);
 
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
@@ -499,8 +500,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     meeting_name: Option<String>,
 ) -> Result<(), String> {
     info!(
-        "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}",
-        mic_device_name, system_device_name, meeting_name
+        "Starting recording with specific devices; microphone_configured={}, system_audio_configured={}, meeting_name_configured={}",
+        mic_device_name.is_some(),
+        system_device_name.is_some(),
+        meeting_name.is_some()
     );
 
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
@@ -562,7 +565,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Load recording preferences to check auto_save setting
     let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
         Ok(prefs) => {
-            info!("📋 Loaded recording preferences: auto_save={}", prefs.auto_save);
+            info!("📋 Loaded recording preferences: auto_save={}, save_folder={:?}", prefs.auto_save, prefs.save_folder);
+            manager.set_save_folder(prefs.save_folder);
             prefs.auto_save
         }
         Err(e) => {
@@ -846,6 +850,11 @@ pub async fn stop_recording<R: Runtime>(
     };
 
     match config.as_deref() {
+        // A retranscription, import or speaker-identification job is using the engine; it unloads
+        // the model itself when it finishes.
+        _ if crate::audio::common::batch_engine_busy() => {
+            info!("Skipping model unload after recording: a batch transcription job is running");
+        }
         Some("parakeet") => {
             info!("🦜 Unloading Parakeet model...");
             let engine_clone = {
@@ -1025,13 +1034,10 @@ pub async fn stop_recording<R: Runtime>(
             manager.save_recording_only(&app)
         ).await {
             Ok(Ok(_)) => {
-                info!("✅ Recording data saved successfully during cleanup");
+                info!("Recording data saved successfully during cleanup");
             }
-            Ok(Err(e)) => {
-                warn!(
-                    "⚠️ Error during recording cleanup (transcripts preserved): {}",
-                    e
-                );
+            Ok(Err(_)) => {
+                warn!("Recording cleanup failed; transcripts preserved");
                 // Don't fail shutdown - transcripts are already preserved
             }
             Err(_) => {
@@ -1062,9 +1068,11 @@ pub async fn stop_recording<R: Runtime>(
         _ => (None, None),
     };
 
-    info!("📤 Preparing recording metadata for frontend save");
-    info!("   folder_path: {:?}", folder_path_str);
-    info!("   meeting_name: {:?}", meeting_name_str);
+    info!(
+        "Preparing recording metadata for frontend save; folder_available={}, meeting_name_available={}",
+        folder_path_str.is_some(),
+        meeting_name_str.is_some()
+    );
 
     // Database save removed - frontend will handle this after receiving all transcripts
     info!("ℹ️ Skipping database save in Rust - frontend will save after all transcripts received");
