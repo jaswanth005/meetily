@@ -1,58 +1,54 @@
-// Auto-detect meetings and toggle recording without user input.
+// Auto-detect meetings and toggle recording without user input (macOS).
 //
 // Signals watched:
-//   1. Process launches — Zoom, Teams, Slack, Discord, Webex, GoToMeeting desktop apps
-//   2. Browser tab URLs — Google Meet, Zoom-web, Teams-web, Whereby (Chrome/Safari/Arc/Edge)
+//   1. Call-only apps running — Webex, GoToMeeting, BlueJeans, Google Meet app
+//   2. Zoom running AND a window title contains "Meeting" (skips the idle home screen)
+//   3. A meeting URL open in a browser tab (Google Meet, Zoom web, Teams web,
+//      Whereby, Gather, Around), read from each running browser via AppleScript.
+//      Firefox has no AppleScript surface for its tabs, so it is not covered.
 //
-// State machine:
-//   - "auto-started" flag tracks whether WE fired the record. If the user
-//     manually stops recording, the flag clears so we don't try to stop again.
-//   - We only auto-stop if we auto-started; a manually-started recording is
-//     never touched by the detector.
+// Discord, Slack, Teams desktop and FaceTime are deliberately not watched by
+// process: they idle in the background and would start recordings by mistake.
+//
+// State machine (see `Watcher`):
+//   - A recording is started only when a meeting *starts*. If the user stops
+//     it by hand, or the start fails, it is not retried until the next meeting.
+//   - Only a recording the detector started is ever stopped by it; a
+//     recording the user started by hand is never touched.
+//   - The "Start recording when a meeting starts" setting turns it all off.
 //
 // Polling interval: 10s (light on CPU, catches meeting starts within 10s).
 
+use std::collections::HashSet;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Runtime};
 
 use crate::tray;
 
-static AUTO_STARTED: AtomicBool = AtomicBool::new(false);
+const POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Checks to wait for a recording the detector asked for to begin (it may
+/// need to load a model) before giving up on it.
+const START_WAIT_CHECKS: u8 = 6;
 
 /// Apps whose presence in the process list is a "call-only" signal — these
 /// apps are launched to make/join a call, not left idling. Zoom is EXCLUDED
 /// from this list even though it's the most common — Zoom often idles with
 /// its home screen open, so we check its window title instead (see below).
 const CALL_ONLY_PROCESSES: &[&str] = &[
-    "Webex",             // Webex
-    "GoToMeeting",       // GoTo Meeting
-    "BlueJeans",         // BlueJeans
-    "GoogleMeet",        // Google Meet standalone app (if installed)
+    "Webex",       // Webex
+    "GoToMeeting", // GoTo Meeting
+    "BlueJeans",   // BlueJeans
+    "GoogleMeet",  // Google Meet standalone app (if installed)
 ];
 
-/// Substring in Zoom's window title that means we're actually in a meeting
-/// (as opposed to sitting on the home screen). Zoom uses "Zoom Meeting" for
-/// active meetings, and "Zoom" / "Zoom - Free Account" etc. when idle.
-const ZOOM_IN_MEETING_TITLE_SUBSTRING: &str = "Meeting";
+const ZOOM_PROCESS: &str = "zoom.us";
 
-/// Substrings that mark a browser tab URL as a meeting-in-progress.
-const MEETING_URL_PATTERNS: &[&str] = &[
-    "meet.google.com/",             // Google Meet (path segment after the / is the meeting id)
-    "zoom.us/j/",                   // Zoom join links
-    "zoom.us/wc/",                  // Zoom web-client meeting
-    "app.zoom.us/wc/",              // Zoom web-client alt host
-    "teams.microsoft.com/l/meetup-join", // Teams meetup-join
-    "teams.live.com/meet",          // Teams personal
-    "teams.microsoft.com/v2/",      // Teams v2 web client
-    "whereby.com/",                 // Whereby room URLs
-    "app.gather.town/app/",         // Gather Town
-    "around.co/r/",                 // Around
-];
-
-/// Browsers we can query for open tabs via AppleScript.
+/// Browsers we can query for open tabs via AppleScript. Each name is both the
+/// app's AppleScript name and its process name.
 const BROWSERS: &[&str] = &[
     "Google Chrome",
     "Google Chrome Canary",
@@ -66,175 +62,361 @@ const BROWSERS: &[&str] = &[
     "SigmaOS",
 ];
 
-fn matching_meeting_process() -> Option<String> {
-    use sysinfo::System;
-    let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-
-    // 1) Call-only apps: presence = meeting.
-    let processes = sys.processes();
-    for proc in processes.values() {
-        let name = proc.name().to_string_lossy();
-        for target in CALL_ONLY_PROCESSES {
-            if name == *target {
-                return Some(name.to_string());
-            }
-        }
-    }
-
-    // 2) Zoom: only fires if its main window title contains "Meeting" (idle
-    // Zoom shows "Zoom" or "Zoom - Free Account", active meeting shows
-    // "Zoom Meeting"). Skips the false-positive of idle Zoom.
-    let zoom_running = processes.values().any(|p| p.name().to_string_lossy() == "zoom.us");
-    if zoom_running && zoom_window_indicates_meeting() {
-        return Some("Zoom (in meeting)".into());
-    }
-
-    None
+struct MeetingSite {
+    name: &'static str,
+    /// Matches this host and its subdomains (Zoom links use hosts like us02web.zoom.us).
+    host: &'static str,
+    path_prefix: &'static str,
+    /// Accepts the path segment after `path_prefix` (the meeting or room id).
+    is_meeting_id: fn(&str) -> bool,
 }
 
-/// Ask System Events for Zoom's window title and check if it contains "Meeting".
+/// Browser URLs that mean a meeting is in progress. Each needs a meeting id
+/// after the prefix, so a site's home page does not count.
+const MEETING_SITES: &[MeetingSite] = &[
+    MeetingSite { name: "Google Meet", host: "meet.google.com", path_prefix: "/", is_meeting_id: is_meet_code },
+    MeetingSite { name: "Zoom", host: "zoom.us", path_prefix: "/j/", is_meeting_id: is_non_empty },
+    MeetingSite { name: "Zoom", host: "zoom.us", path_prefix: "/wc/", is_meeting_id: is_non_empty },
+    MeetingSite { name: "Microsoft Teams", host: "teams.microsoft.com", path_prefix: "/l/meetup-join/", is_meeting_id: is_non_empty },
+    MeetingSite { name: "Microsoft Teams", host: "teams.live.com", path_prefix: "/meet/", is_meeting_id: is_non_empty },
+    MeetingSite { name: "Whereby", host: "whereby.com", path_prefix: "/", is_meeting_id: is_non_empty },
+    MeetingSite { name: "Gather", host: "app.gather.town", path_prefix: "/app/", is_meeting_id: is_non_empty },
+    MeetingSite { name: "Around", host: "around.co", path_prefix: "/r/", is_meeting_id: is_non_empty },
+];
+
+fn is_non_empty(segment: &str) -> bool {
+    !segment.is_empty()
+}
+
+/// Google Meet codes look like `abc-defg-hij`.
+fn is_meet_code(segment: &str) -> bool {
+    let parts: Vec<&str> = segment.split('-').collect();
+    parts.len() == 3
+        && parts.iter().zip([3, 4, 3]).all(|(part, len)| {
+            part.len() == len && part.chars().all(|c| c.is_ascii_lowercase())
+        })
+}
+
+/// Names the meeting site a browser tab URL belongs to, if it is a meeting.
+fn meeting_site(url: &str) -> Option<&'static str> {
+    let url = url::Url::parse(url).ok()?;
+    let host = url.host_str()?;
+    MEETING_SITES.iter().find_map(|site| {
+        let host_matches = host == site.host
+            || host.strip_suffix(site.host).is_some_and(|sub| sub.ends_with('.'));
+        let id = url.path().strip_prefix(site.path_prefix)?.split('/').next()?;
+        (host_matches && (site.is_meeting_id)(id)).then_some(site.name)
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    Start,
+    Stop,
+}
+
+/// The recording the detector started, if any.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Ours {
+    #[default]
+    None,
+    /// Asked for; waiting for it to begin.
+    Starting { checks_left: u8 },
+    Recording,
+}
+
+#[derive(Debug, Default)]
+struct Watcher {
+    meeting_was_active: bool,
+    ours: Ours,
+}
+
+impl Watcher {
+    /// Decides what to do after one check.
+    fn step(&mut self, meeting_active: bool, recording: bool) -> Option<Action> {
+        let meeting_started = meeting_active && !self.meeting_was_active;
+        self.meeting_was_active = meeting_active;
+
+        if let Ours::Starting { checks_left } = self.ours {
+            self.ours = match (recording, checks_left) {
+                (true, _) => Ours::Recording,
+                (false, 0) => Ours::None,
+                (false, n) => Ours::Starting { checks_left: n - 1 },
+            };
+        }
+
+        match self.ours {
+            Ours::None if meeting_started && !recording => {
+                self.ours = Ours::Starting { checks_left: START_WAIT_CHECKS };
+                Some(Action::Start)
+            }
+            // Stopped by hand (or failed): forget it, and don't restart this meeting.
+            Ours::Recording if !recording => {
+                self.ours = Ours::None;
+                None
+            }
+            Ours::Recording if !meeting_active => {
+                self.ours = Ours::None;
+                Some(Action::Stop)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Reads what is running and which tabs are open.
+struct Probe {
+    system: System,
+    /// Browsers we already warned about, so a refused permission logs once.
+    warned: HashSet<&'static str>,
+}
+
+impl Probe {
+    /// Names the meeting in progress, if any.
+    fn find_meeting(&mut self) -> Option<String> {
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::new(),
+        );
+        let running: HashSet<String> = self
+            .system
+            .processes()
+            .values()
+            .map(|p| p.name().to_string_lossy().into_owned())
+            .collect();
+
+        if let Some(app) = CALL_ONLY_PROCESSES.iter().find(|app| running.contains(**app)) {
+            return Some(app.to_string());
+        }
+        if running.contains(ZOOM_PROCESS) && zoom_window_indicates_meeting() {
+            return Some("Zoom (in meeting)".into());
+        }
+        for browser in BROWSERS.iter().filter(|b| running.contains(**b)) {
+            if let Some(site) = self.tab_urls(browser).iter().find_map(|u| meeting_site(u)) {
+                return Some(format!("{} in {}", site, browser));
+            }
+        }
+        None
+    }
+
+    fn tab_urls(&mut self, browser: &'static str) -> Vec<String> {
+        let script = format!(
+            r#"set urlList to {{}}
+with timeout of 5 seconds
+    tell application "{browser}"
+        repeat with w in windows
+            repeat with t in tabs of w
+                try
+                    set end of urlList to (URL of t as text)
+                end try
+            end repeat
+        end repeat
+    end tell
+end timeout
+set AppleScript's text item delimiters to linefeed
+return urlList as text"#
+        );
+        let output = match Command::new("osascript").arg("-e").arg(&script).output() {
+            Ok(output) => output,
+            Err(e) => {
+                self.warn_once(browser, || format!("[auto-detect] could not run osascript: {}", e));
+                return Vec::new();
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // -1743: the user denied (or has not yet allowed) Automation access.
+            if stderr.contains("-1743") {
+                self.warn_once(browser, || format!(
+                    "[auto-detect] not allowed to read {} tabs; allow Meetily under System Settings → Privacy & Security → Automation",
+                    browser
+                ));
+            } else {
+                self.warn_once(browser, || format!(
+                    "[auto-detect] could not read {} tabs: {}",
+                    browser,
+                    stderr.trim()
+                ));
+            }
+            return Vec::new();
+        }
+        // Reading works (again), so a later failure is worth one more warning.
+        self.warned.remove(browser);
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn warn_once(&mut self, browser: &'static str, message: impl FnOnce() -> String) {
+        if self.warned.insert(browser) {
+            log::warn!("{}", message());
+        }
+    }
+}
+
+/// Ask System Events for Zoom's window titles and check if one contains "Meeting"
+/// (idle Zoom shows "Zoom" or "Zoom - Free Account", an active call "Zoom Meeting").
 fn zoom_window_indicates_meeting() -> bool {
     let script = r#"
-    tell application "System Events"
-        try
-            tell process "zoom.us"
-                set winTitles to name of every window
-                repeat with t in winTitles
-                    if t contains "Meeting" then return "yes"
-                end repeat
-            end tell
-        end try
-        return "no"
-    end tell
+    with timeout of 5 seconds
+        tell application "System Events"
+            try
+                tell process "zoom.us"
+                    set winTitles to name of every window
+                    repeat with t in winTitles
+                        if t contains "Meeting" then return "yes"
+                    end repeat
+                end tell
+            end try
+            return "no"
+        end tell
+    end timeout
     "#;
     match Command::new("osascript").arg("-e").arg(script).output() {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim() == "yes"
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() == "yes",
         _ => false,
     }
 }
 
-fn get_tab_urls(browser: &str) -> Vec<String> {
-    // Only run the AppleScript if the browser is actually running (fast path).
-    let is_running = Command::new("osascript")
-        .arg("-e")
-        .arg(format!(
-            "tell application \"System Events\" to (name of processes) contains \"{}\"",
-            browser
-        ))
-        .output()
-        .ok()
-        .and_then(|o| Some(String::from_utf8_lossy(&o.stdout).trim() == "true"))
-        .unwrap_or(false);
-
-    if !is_running {
-        return Vec::new();
-    }
-
-    let script = if browser == "Safari" {
-        // Safari's tab addressability is slightly different from Chromium-based browsers
-        format!(
-            r#"tell application "{}"
-                set urlList to {{}}
-                try
-                    repeat with w in windows
-                        repeat with t in tabs of w
-                            try
-                                set end of urlList to URL of t
-                            end try
-                        end repeat
-                    end repeat
-                end try
-                return urlList
-            end tell"#,
-            browser
-        )
-    } else {
-        format!(
-            r#"tell application "{}"
-                set urlList to {{}}
-                try
-                    repeat with w in windows
-                        repeat with t in tabs of w
-                            try
-                                set end of urlList to URL of t
-                            end try
-                        end repeat
-                    end repeat
-                end try
-                return urlList
-            end tell"#,
-            browser
-        )
-    };
-
-    match Command::new("osascript").arg("-e").arg(&script).output() {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .split(", ")
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn matching_meeting_url() -> Option<String> {
-    for browser in BROWSERS {
-        let urls = get_tab_urls(browser);
-        for url in urls {
-            for pat in MEETING_URL_PATTERNS {
-                if url.contains(pat) {
-                    return Some(url.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Spawn the background watcher. Runs for the lifetime of the app.
+/// Spawn the background watcher. Runs for the lifetime of the app on its own
+/// thread, because each check waits on osascript.
 pub fn spawn<R: Runtime>(app: AppHandle<R>) {
-    tauri::async_runtime::spawn(async move {
-        log::info!("[auto-detect] meeting watcher started (interval=10s)");
+    let spawned = std::thread::Builder::new()
+        .name("meeting-detector".into())
+        .spawn(move || {
+            log::info!("[auto-detect] meeting watcher started (interval={}s)", POLL_INTERVAL.as_secs());
+            let mut watcher = Watcher::default();
+            let mut probe = Probe { system: System::new(), warned: HashSet::new() };
 
-        loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            loop {
+                std::thread::sleep(POLL_INTERVAL);
 
-            let proc_hit = matching_meeting_process();
-            let url_hit = matching_meeting_url();
-            let meeting_active = proc_hit.is_some() || url_hit.is_some();
-            let currently_recording = crate::is_recording().await;
-            let we_started = AUTO_STARTED.load(Ordering::Relaxed);
-
-            match (meeting_active, currently_recording, we_started) {
-                // Meeting detected, not recording → auto-start
-                (true, false, _) => {
-                    let reason = match (&proc_hit, &url_hit) {
-                        (Some(p), _) => format!("process={}", p),
-                        (_, Some(u)) => format!("url={}", u.chars().take(80).collect::<String>()),
-                        _ => "(unknown)".into(),
-                    };
-                    log::info!("[auto-detect] meeting detected ({}) → auto-starting recording", reason);
-                    tray::toggle_recording_handler(&app);
-                    AUTO_STARTED.store(true, Ordering::Relaxed);
+                if !crate::audio::recording_preferences::auto_detect_meetings(&app) {
+                    watcher = Watcher::default();
+                    continue;
                 }
 
-                // No meeting active, we started this recording → auto-stop
-                (false, true, true) => {
-                    log::info!("[auto-detect] no meeting active → stopping our auto-recording");
-                    tray::toggle_recording_handler(&app);
-                    AUTO_STARTED.store(false, Ordering::Relaxed);
-                }
+                let meeting = probe.find_meeting();
+                let recording =
+                    tauri::async_runtime::block_on(crate::audio::recording_commands::is_recording());
 
-                // Recording stopped (probably by user) → clear our flag
-                (_, false, true) => {
-                    AUTO_STARTED.store(false, Ordering::Relaxed);
+                match watcher.step(meeting.is_some(), recording) {
+                    Some(Action::Start) => {
+                        log::info!(
+                            "[auto-detect] meeting detected ({}) → auto-starting recording",
+                            meeting.as_deref().unwrap_or_default()
+                        );
+                        tray::toggle_recording_handler(&app);
+                    }
+                    Some(Action::Stop) => {
+                        log::info!("[auto-detect] no meeting active → stopping our auto-recording");
+                        tray::toggle_recording_handler(&app);
+                    }
+                    None => {}
                 }
-
-                _ => {}
             }
+        });
+    if let Err(e) = spawned {
+        log::error!("[auto-detect] failed to start meeting watcher: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meeting_urls_are_recognised() {
+        let meetings = [
+            ("https://meet.google.com/abc-defg-hij", "Google Meet"),
+            ("https://meet.google.com/abc-defg-hij?authuser=1", "Google Meet"),
+            ("https://zoom.us/j/1234567890?pwd=x", "Zoom"),
+            ("https://us02web.zoom.us/j/1234567890", "Zoom"),
+            ("https://app.zoom.us/wc/1234567890/join", "Zoom"),
+            ("https://teams.microsoft.com/l/meetup-join/19%3ameeting_x/0", "Microsoft Teams"),
+            ("https://teams.live.com/meet/9876543210", "Microsoft Teams"),
+            ("https://whereby.com/my-room", "Whereby"),
+            ("https://app.gather.town/app/abc/office", "Gather"),
+            ("https://around.co/r/standup", "Around"),
+        ];
+        for (url, site) in meetings {
+            assert_eq!(meeting_site(url), Some(site), "{url}");
         }
-    });
+    }
+
+    #[test]
+    fn pages_that_are_not_meetings_are_ignored() {
+        for url in [
+            "https://meet.google.com/",
+            "https://meet.google.com/landing",
+            "https://zoom.us/",
+            "https://zoom.us/signin",
+            "https://teams.microsoft.com/v2/",
+            "https://whereby.com/",
+            "https://notzoom.us/j/123",
+            "https://www.google.com/search?q=meet.google.com/abc-defg-hij",
+            "missing value",
+            "",
+        ] {
+            assert_eq!(meeting_site(url), None, "{url}");
+        }
+    }
+
+    /// Feeds (meeting_active, recording) checks and returns the actions taken.
+    fn run(checks: &[(bool, bool)]) -> Vec<Option<Action>> {
+        let mut watcher = Watcher::default();
+        checks.iter().map(|&(m, r)| watcher.step(m, r)).collect()
+    }
+
+    #[test]
+    fn starts_when_a_meeting_starts_and_stops_when_it_ends() {
+        assert_eq!(
+            run(&[(false, false), (true, false), (true, true), (true, true), (false, true)]),
+            [None, Some(Action::Start), None, None, Some(Action::Stop)]
+        );
+    }
+
+    #[test]
+    fn never_stops_a_recording_the_user_started() {
+        assert_eq!(
+            run(&[(false, true), (true, true), (false, true), (false, true)]),
+            [None, None, None, None]
+        );
+    }
+
+    #[test]
+    fn does_not_restart_after_the_user_stops_it_during_the_meeting() {
+        assert_eq!(
+            run(&[(true, false), (true, true), (true, false), (true, false), (false, false)]),
+            [Some(Action::Start), None, None, None, None]
+        );
+    }
+
+    #[test]
+    fn waits_for_a_slow_start_then_stops_it_when_the_meeting_ends() {
+        assert_eq!(
+            run(&[(true, false), (true, false), (true, false), (true, true), (false, true)]),
+            [Some(Action::Start), None, None, None, Some(Action::Stop)]
+        );
+    }
+
+    #[test]
+    fn gives_up_on_a_start_that_never_happens_without_retrying() {
+        let mut checks = vec![(true, false); 2 + START_WAIT_CHECKS as usize];
+        checks.push((true, true)); // the user starts one by hand later
+        checks.push((false, true));
+        let actions = run(&checks);
+        assert_eq!(actions[0], Some(Action::Start));
+        assert!(actions[1..].iter().all(Option::is_none), "{actions:?}");
+    }
+
+    #[test]
+    fn starts_again_for_the_next_meeting() {
+        assert_eq!(
+            run(&[(true, false), (true, true), (false, true), (false, false), (true, false)]),
+            [Some(Action::Start), None, Some(Action::Stop), None, Some(Action::Start)]
+        );
+    }
 }

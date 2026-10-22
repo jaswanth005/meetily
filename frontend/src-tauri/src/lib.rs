@@ -55,6 +55,7 @@ pub mod playback;
 pub mod state;
 pub mod summary;
 pub mod tray;
+#[cfg(target_os = "macos")]
 pub mod meeting_detector;
 pub mod utils;
 pub mod whisper_engine;
@@ -675,9 +676,9 @@ pub fn run() {
             #[cfg(desktop)]
             register_toggle_recording_shortcuts(_app.handle());
 
-            // Auto-detect meetings (Zoom/Teams/Slack/Discord/Webex processes +
-            // Meet/Zoom-web/Teams-web/Whereby browser tabs) and toggle recording
-            // without user input. Poll interval 10s.
+            // Auto-detect meetings (call apps, Zoom in a call, meeting tabs in
+            // browsers) and start/stop recording without user input.
+            #[cfg(target_os = "macos")]
             meeting_detector::spawn(_app.handle().clone());
 
             // Initialize notification system with proper defaults
