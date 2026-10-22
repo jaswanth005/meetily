@@ -75,14 +75,54 @@ struct MeetingSite {
 /// Browser URLs that mean a meeting is in progress. Each needs a meeting id
 /// after the prefix, so a site's home page does not count.
 const MEETING_SITES: &[MeetingSite] = &[
-    MeetingSite { name: "Google Meet", host: "meet.google.com", path_prefix: "/", is_meeting_id: is_meet_code },
-    MeetingSite { name: "Zoom", host: "zoom.us", path_prefix: "/j/", is_meeting_id: is_non_empty },
-    MeetingSite { name: "Zoom", host: "zoom.us", path_prefix: "/wc/", is_meeting_id: is_non_empty },
-    MeetingSite { name: "Microsoft Teams", host: "teams.microsoft.com", path_prefix: "/l/meetup-join/", is_meeting_id: is_non_empty },
-    MeetingSite { name: "Microsoft Teams", host: "teams.live.com", path_prefix: "/meet/", is_meeting_id: is_non_empty },
-    MeetingSite { name: "Whereby", host: "whereby.com", path_prefix: "/", is_meeting_id: is_non_empty },
-    MeetingSite { name: "Gather", host: "app.gather.town", path_prefix: "/app/", is_meeting_id: is_non_empty },
-    MeetingSite { name: "Around", host: "around.co", path_prefix: "/r/", is_meeting_id: is_non_empty },
+    MeetingSite {
+        name: "Google Meet",
+        host: "meet.google.com",
+        path_prefix: "/",
+        is_meeting_id: is_meet_code,
+    },
+    MeetingSite {
+        name: "Zoom",
+        host: "zoom.us",
+        path_prefix: "/j/",
+        is_meeting_id: is_non_empty,
+    },
+    MeetingSite {
+        name: "Zoom",
+        host: "zoom.us",
+        path_prefix: "/wc/",
+        is_meeting_id: is_non_empty,
+    },
+    MeetingSite {
+        name: "Microsoft Teams",
+        host: "teams.microsoft.com",
+        path_prefix: "/l/meetup-join/",
+        is_meeting_id: is_non_empty,
+    },
+    MeetingSite {
+        name: "Microsoft Teams",
+        host: "teams.live.com",
+        path_prefix: "/meet/",
+        is_meeting_id: is_non_empty,
+    },
+    MeetingSite {
+        name: "Whereby",
+        host: "whereby.com",
+        path_prefix: "/",
+        is_meeting_id: is_non_empty,
+    },
+    MeetingSite {
+        name: "Gather",
+        host: "app.gather.town",
+        path_prefix: "/app/",
+        is_meeting_id: is_non_empty,
+    },
+    MeetingSite {
+        name: "Around",
+        host: "around.co",
+        path_prefix: "/r/",
+        is_meeting_id: is_non_empty,
+    },
 ];
 
 fn is_non_empty(segment: &str) -> bool {
@@ -93,9 +133,10 @@ fn is_non_empty(segment: &str) -> bool {
 fn is_meet_code(segment: &str) -> bool {
     let parts: Vec<&str> = segment.split('-').collect();
     parts.len() == 3
-        && parts.iter().zip([3, 4, 3]).all(|(part, len)| {
-            part.len() == len && part.chars().all(|c| c.is_ascii_lowercase())
-        })
+        && parts
+            .iter()
+            .zip([3, 4, 3])
+            .all(|(part, len)| part.len() == len && part.chars().all(|c| c.is_ascii_lowercase()))
 }
 
 /// Names the meeting site a browser tab URL belongs to, if it is a meeting.
@@ -104,8 +145,14 @@ fn meeting_site(url: &str) -> Option<&'static str> {
     let host = url.host_str()?;
     MEETING_SITES.iter().find_map(|site| {
         let host_matches = host == site.host
-            || host.strip_suffix(site.host).is_some_and(|sub| sub.ends_with('.'));
-        let id = url.path().strip_prefix(site.path_prefix)?.split('/').next()?;
+            || host
+                .strip_suffix(site.host)
+                .is_some_and(|sub| sub.ends_with('.'));
+        let id = url
+            .path()
+            .strip_prefix(site.path_prefix)?
+            .split('/')
+            .next()?;
         (host_matches && (site.is_meeting_id)(id)).then_some(site.name)
     })
 }
@@ -122,7 +169,9 @@ enum Ours {
     #[default]
     None,
     /// Asked for; waiting for it to begin.
-    Starting { checks_left: u8 },
+    Starting {
+        checks_left: u8,
+    },
     Recording,
 }
 
@@ -140,8 +189,13 @@ struct Watcher {
 impl Watcher {
     /// Decides what to do after one check.
     fn step(&mut self, meeting_active: bool, recording: bool) -> Option<Action> {
-        self.quiet_checks = if meeting_active { 0 } else { self.quiet_checks.saturating_add(1) };
-        let meeting_active = meeting_active || (self.meeting_was_active && self.quiet_checks < END_AFTER_QUIET_CHECKS);
+        self.quiet_checks = if meeting_active {
+            0
+        } else {
+            self.quiet_checks.saturating_add(1)
+        };
+        let meeting_active = meeting_active
+            || (self.meeting_was_active && self.quiet_checks < END_AFTER_QUIET_CHECKS);
         let meeting_started = meeting_active && !self.meeting_was_active;
         self.meeting_was_active = meeting_active;
 
@@ -155,7 +209,9 @@ impl Watcher {
 
         match self.ours {
             Ours::None if meeting_started && !recording => {
-                self.ours = Ours::Starting { checks_left: START_WAIT_CHECKS };
+                self.ours = Ours::Starting {
+                    checks_left: START_WAIT_CHECKS,
+                };
                 Some(Action::Start)
             }
             // Stopped by hand (or failed): forget it, and don't restart this meeting.
@@ -194,7 +250,10 @@ impl Probe {
             .map(|p| p.name().to_string_lossy().into_owned())
             .collect();
 
-        if let Some(app) = CALL_ONLY_PROCESSES.iter().find(|app| running.contains(**app)) {
+        if let Some(app) = CALL_ONLY_PROCESSES
+            .iter()
+            .find(|app| running.contains(**app))
+        {
             return Some(app.to_string());
         }
         if running.contains(ZOOM_PROCESS) && zoom_window_indicates_meeting() {
@@ -228,7 +287,9 @@ return urlList as text"#
         let output = match Command::new("osascript").arg("-e").arg(&script).output() {
             Ok(output) => output,
             Err(e) => {
-                self.warn_once(browser, || format!("[auto-detect] could not run osascript: {}", e));
+                self.warn_once(browser, || {
+                    format!("[auto-detect] could not run osascript: {}", e)
+                });
                 return Vec::new();
             }
         };
@@ -241,11 +302,13 @@ return urlList as text"#
                     browser
                 ));
             } else {
-                self.warn_once(browser, || format!(
-                    "[auto-detect] could not read {} tabs: {}",
-                    browser,
-                    stderr.trim()
-                ));
+                self.warn_once(browser, || {
+                    format!(
+                        "[auto-detect] could not read {} tabs: {}",
+                        browser,
+                        stderr.trim()
+                    )
+                });
             }
             return Vec::new();
         }
@@ -294,9 +357,15 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
     let spawned = std::thread::Builder::new()
         .name("meeting-detector".into())
         .spawn(move || {
-            log::info!("[auto-detect] meeting watcher started (interval={}s)", POLL_INTERVAL.as_secs());
+            log::info!(
+                "[auto-detect] meeting watcher started (interval={}s)",
+                POLL_INTERVAL.as_secs()
+            );
             let mut watcher = Watcher::default();
-            let mut probe = Probe { system: System::new(), warned: HashSet::new() };
+            let mut probe = Probe {
+                system: System::new(),
+                warned: HashSet::new(),
+            };
 
             loop {
                 std::thread::sleep(POLL_INTERVAL);
@@ -307,8 +376,9 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
                 }
 
                 let meeting = probe.find_meeting();
-                let recording =
-                    tauri::async_runtime::block_on(crate::audio::recording_commands::is_recording());
+                let recording = tauri::async_runtime::block_on(
+                    crate::audio::recording_commands::is_recording(),
+                );
 
                 match watcher.step(meeting.is_some(), recording) {
                     Some(Action::Start) => {
@@ -339,11 +409,17 @@ mod tests {
     fn meeting_urls_are_recognised() {
         let meetings = [
             ("https://meet.google.com/abc-defg-hij", "Google Meet"),
-            ("https://meet.google.com/abc-defg-hij?authuser=1", "Google Meet"),
+            (
+                "https://meet.google.com/abc-defg-hij?authuser=1",
+                "Google Meet",
+            ),
             ("https://zoom.us/j/1234567890?pwd=x", "Zoom"),
             ("https://us02web.zoom.us/j/1234567890", "Zoom"),
             ("https://app.zoom.us/wc/1234567890/join", "Zoom"),
-            ("https://teams.microsoft.com/l/meetup-join/19%3ameeting_x/0", "Microsoft Teams"),
+            (
+                "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x/0",
+                "Microsoft Teams",
+            ),
             ("https://teams.live.com/meet/9876543210", "Microsoft Teams"),
             ("https://whereby.com/my-room", "Whereby"),
             ("https://app.gather.town/app/abc/office", "Gather"),
@@ -381,15 +457,39 @@ mod tests {
     #[test]
     fn starts_when_a_meeting_starts_and_stops_when_it_ends() {
         assert_eq!(
-            run(&[(false, false), (true, false), (true, true), (true, true), (false, true), (false, true), (false, true)]),
-            [None, Some(Action::Start), None, None, None, None, Some(Action::Stop)]
+            run(&[
+                (false, false),
+                (true, false),
+                (true, true),
+                (true, true),
+                (false, true),
+                (false, true),
+                (false, true)
+            ]),
+            [
+                None,
+                Some(Action::Start),
+                None,
+                None,
+                None,
+                None,
+                Some(Action::Stop)
+            ]
         );
     }
 
     #[test]
     fn a_single_missed_check_neither_stops_nor_restarts() {
         assert_eq!(
-            run(&[(true, false), (true, true), (false, true), (true, true), (false, true), (false, true), (true, true)]),
+            run(&[
+                (true, false),
+                (true, true),
+                (false, true),
+                (true, true),
+                (false, true),
+                (false, true),
+                (true, true)
+            ]),
             [Some(Action::Start), None, None, None, None, None, None]
         );
     }
@@ -405,7 +505,13 @@ mod tests {
     #[test]
     fn does_not_restart_after_the_user_stops_it_during_the_meeting() {
         assert_eq!(
-            run(&[(true, false), (true, true), (true, false), (true, false), (false, false)]),
+            run(&[
+                (true, false),
+                (true, true),
+                (true, false),
+                (true, false),
+                (false, false)
+            ]),
             [Some(Action::Start), None, None, None, None]
         );
     }
@@ -413,8 +519,24 @@ mod tests {
     #[test]
     fn waits_for_a_slow_start_then_stops_it_when_the_meeting_ends() {
         assert_eq!(
-            run(&[(true, false), (true, false), (true, false), (true, true), (false, true), (false, true), (false, true)]),
-            [Some(Action::Start), None, None, None, None, None, Some(Action::Stop)]
+            run(&[
+                (true, false),
+                (true, false),
+                (true, false),
+                (true, true),
+                (false, true),
+                (false, true),
+                (false, true)
+            ]),
+            [
+                Some(Action::Start),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Action::Stop)
+            ]
         );
     }
 
@@ -431,8 +553,24 @@ mod tests {
     #[test]
     fn starts_again_for_the_next_meeting() {
         assert_eq!(
-            run(&[(true, false), (true, true), (false, true), (false, true), (false, true), (false, false), (true, false)]),
-            [Some(Action::Start), None, None, None, Some(Action::Stop), None, Some(Action::Start)]
+            run(&[
+                (true, false),
+                (true, true),
+                (false, true),
+                (false, true),
+                (false, true),
+                (false, false),
+                (true, false)
+            ]),
+            [
+                Some(Action::Start),
+                None,
+                None,
+                None,
+                Some(Action::Stop),
+                None,
+                Some(Action::Start)
+            ]
         );
     }
 }
