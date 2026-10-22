@@ -13,6 +13,7 @@
 // State machine (see `Watcher`):
 //   - A recording is started only when a meeting *starts*. If the user stops
 //     it by hand, or the start fails, it is not retried until the next meeting.
+//   - A meeting only counts as over after several quiet checks in a row.
 //   - Only a recording the detector started is ever stopped by it; a
 //     recording the user started by hand is never touched.
 //   - The "Start recording when a meeting starts" setting turns it all off.
@@ -125,15 +126,22 @@ enum Ours {
     Recording,
 }
 
+/// Consecutive checks without a meeting before it counts as over, so one
+/// failed or timed-out probe does not end a recording.
+const END_AFTER_QUIET_CHECKS: u8 = 3;
+
 #[derive(Debug, Default)]
 struct Watcher {
     meeting_was_active: bool,
+    quiet_checks: u8,
     ours: Ours,
 }
 
 impl Watcher {
     /// Decides what to do after one check.
     fn step(&mut self, meeting_active: bool, recording: bool) -> Option<Action> {
+        self.quiet_checks = if meeting_active { 0 } else { self.quiet_checks.saturating_add(1) };
+        let meeting_active = meeting_active || (self.meeting_was_active && self.quiet_checks < END_AFTER_QUIET_CHECKS);
         let meeting_started = meeting_active && !self.meeting_was_active;
         self.meeting_was_active = meeting_active;
 
@@ -373,8 +381,16 @@ mod tests {
     #[test]
     fn starts_when_a_meeting_starts_and_stops_when_it_ends() {
         assert_eq!(
-            run(&[(false, false), (true, false), (true, true), (true, true), (false, true)]),
-            [None, Some(Action::Start), None, None, Some(Action::Stop)]
+            run(&[(false, false), (true, false), (true, true), (true, true), (false, true), (false, true), (false, true)]),
+            [None, Some(Action::Start), None, None, None, None, Some(Action::Stop)]
+        );
+    }
+
+    #[test]
+    fn a_single_missed_check_neither_stops_nor_restarts() {
+        assert_eq!(
+            run(&[(true, false), (true, true), (false, true), (true, true), (false, true), (false, true), (true, true)]),
+            [Some(Action::Start), None, None, None, None, None, None]
         );
     }
 
@@ -397,8 +413,8 @@ mod tests {
     #[test]
     fn waits_for_a_slow_start_then_stops_it_when_the_meeting_ends() {
         assert_eq!(
-            run(&[(true, false), (true, false), (true, false), (true, true), (false, true)]),
-            [Some(Action::Start), None, None, None, Some(Action::Stop)]
+            run(&[(true, false), (true, false), (true, false), (true, true), (false, true), (false, true), (false, true)]),
+            [Some(Action::Start), None, None, None, None, None, Some(Action::Stop)]
         );
     }
 
@@ -415,8 +431,8 @@ mod tests {
     #[test]
     fn starts_again_for_the_next_meeting() {
         assert_eq!(
-            run(&[(true, false), (true, true), (false, true), (false, false), (true, false)]),
-            [Some(Action::Start), None, Some(Action::Stop), None, Some(Action::Start)]
+            run(&[(true, false), (true, true), (false, true), (false, true), (false, true), (false, false), (true, false)]),
+            [Some(Action::Start), None, None, None, Some(Action::Stop), None, Some(Action::Start)]
         );
     }
 }
