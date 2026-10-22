@@ -109,7 +109,7 @@ const MEETING_SITES: &[MeetingSite] = &[
         name: "Whereby",
         host: "whereby.com",
         path_prefix: "/",
-        is_meeting_id: is_non_empty,
+        is_meeting_id: is_whereby_room,
     },
     MeetingSite {
         name: "Gather",
@@ -127,6 +127,36 @@ const MEETING_SITES: &[MeetingSite] = &[
 
 fn is_non_empty(segment: &str) -> bool {
     !segment.is_empty()
+}
+
+const WHEREBY_NON_ROOM_SEGMENTS: &[&str] = &[
+    "information",
+    "pricing",
+    "user",
+    "login",
+    "signin",
+    "sign-in",
+    "signup",
+    "sign-up",
+    "blog",
+    "org",
+    "embed",
+    "product",
+    "products",
+    "solutions",
+    "about",
+    "download",
+    "help",
+    "support",
+    "careers",
+    "legal",
+    "privacy",
+    "terms",
+];
+
+fn is_whereby_room(segment: &str) -> bool {
+    !segment.is_empty()
+        && !WHEREBY_NON_ROOM_SEGMENTS.contains(&segment.to_ascii_lowercase().as_str())
 }
 
 /// Google Meet codes look like `abc-defg-hij`.
@@ -439,6 +469,8 @@ mod tests {
             "https://zoom.us/signin",
             "https://teams.microsoft.com/v2/",
             "https://whereby.com/",
+            "https://whereby.com/pricing",
+            "https://whereby.com/information",
             "https://notzoom.us/j/123",
             "https://www.google.com/search?q=meet.google.com/abc-defg-hij",
             "missing value",
