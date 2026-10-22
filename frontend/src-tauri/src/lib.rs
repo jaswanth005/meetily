@@ -557,6 +557,26 @@ pub fn get_language_preference_internal() -> Option<String> {
     LANGUAGE_PREFERENCE.lock().ok().map(|lang| lang.clone())
 }
 
+/// Binds F13 (external keyboards) and Cmd+Shift+M to toggle recording.
+///
+/// Registered after plugin setup instead of on the plugin builder: a shortcut that
+/// cannot be registered there fails plugin setup and stops the app from starting.
+/// Here a failure only means that hotkey is unavailable.
+#[cfg(desktop)]
+fn register_toggle_recording_shortcuts<R: Runtime>(app: &AppHandle<R>) {
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+
+    for shortcut in [
+        Shortcut::new(None, Code::F13),
+        Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyM),
+    ] {
+        match app.global_shortcut().register(shortcut) {
+            Ok(()) => log::info!("Global hotkey {:?} → toggle recording", shortcut),
+            Err(e) => log::warn!("Global hotkey {:?} unavailable: {}", shortcut, e),
+        }
+    }
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -575,43 +595,16 @@ pub fn run() {
 
     // Global hotkeys to toggle recording without focusing the app.
     // Uses the same toggle_recording_handler the tray menu already fires.
-    //
-    // Two shortcuts registered:
-    //   - F13            → for external keyboards (Wispr-Flow style single key)
-    //   - Cmd+Shift+M    → laptop-friendly fallback (M for Meeting, right-hand only)
-    //
-    // Requires macOS Accessibility permission (System Settings > Privacy > Accessibility)
-    // for global hotkeys to actually fire. Plugin register() succeeds silently
-    // without it, but events won't be delivered.
+    // The shortcuts themselves are registered in setup (register_toggle_recording_shortcuts).
     #[cfg(desktop)]
-    let global_shortcut_plugin = {
-        use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
-
-        let f13_shortcut = Shortcut::new(None, Code::F13);
-        let combo_shortcut = Shortcut::new(
-            Some(Modifiers::META | Modifiers::SHIFT),
-            Code::KeyM,
-        );
-
-        log::info!("Global hotkeys: registering F13 and Cmd+Shift+M → toggle recording");
-
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_shortcuts([f13_shortcut, combo_shortcut])
-            .expect("failed to register global toggle-recording shortcuts")
-            .with_handler(move |app, shortcut, event| {
-                log::debug!(
-                    "Global shortcut event: shortcut={:?} state={:?}",
-                    shortcut,
-                    event.state()
-                );
-                let matched = shortcut == &f13_shortcut || shortcut == &combo_shortcut;
-                if matched && event.state() == ShortcutState::Pressed {
-                    log::info!("Global hotkey pressed ({:?}): toggling recording", shortcut);
-                    tray::toggle_recording_handler(app);
-                }
-            })
-            .build()
-    };
+    let global_shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(|app, shortcut, event| {
+            if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                log::info!("Global hotkey pressed ({:?}): toggling recording", shortcut);
+                tray::toggle_recording_handler(app);
+            }
+        })
+        .build();
 
     builder
         .plugin(tauri_plugin_notification::init())
@@ -678,6 +671,9 @@ pub fn run() {
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
+
+            #[cfg(desktop)]
+            register_toggle_recording_shortcuts(_app.handle());
 
             // Auto-detect meetings (Zoom/Teams/Slack/Discord/Webex processes +
             // Meet/Zoom-web/Teams-web/Whereby browser tabs) and toggle recording
