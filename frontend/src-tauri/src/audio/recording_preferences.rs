@@ -26,6 +26,9 @@ pub struct RecordingPreferences {
     /// Recognise voices named in other meetings and remember voices the user names.
     #[serde(default = "default_remember_voices")]
     pub remember_voices: bool,
+    /// Start a recording when a meeting starts, and stop it when the meeting ends.
+    #[serde(default = "default_auto_detect_meetings")]
+    pub auto_detect_meetings: bool,
     #[cfg(target_os = "macos")]
     #[serde(default)]
     pub system_audio_backend: Option<String>,
@@ -39,6 +42,10 @@ fn default_remember_voices() -> bool {
     true
 }
 
+fn default_auto_detect_meetings() -> bool {
+    true
+}
+
 impl Default for RecordingPreferences {
     fn default() -> Self {
         Self {
@@ -49,6 +56,7 @@ impl Default for RecordingPreferences {
             preferred_system_device: None,
             identify_speakers_after_recording: true,
             remember_voices: true,
+            auto_detect_meetings: true,
             #[cfg(target_os = "macos")]
             system_audio_backend: Some("coreaudio".to_string()),
         }
@@ -111,6 +119,17 @@ pub fn generate_recording_filename(format: &str) -> String {
 /// Whether voices are remembered across meetings; on when the preferences cannot be read.
 pub async fn remember_voices<R: Runtime>(app: &AppHandle<R>) -> bool {
     load_recording_preferences(app).await.map(|p| p.remember_voices).unwrap_or(true)
+}
+
+/// Whether meeting auto-detection is on; on when the preferences cannot be read.
+/// Reads the store directly because the detector asks every few seconds and
+/// load_recording_preferences logs each call.
+pub fn auto_detect_meetings<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.store("recording_preferences.json")
+        .ok()
+        .and_then(|store| store.get("preferences"))
+        .and_then(|prefs| prefs.get("auto_detect_meetings")?.as_bool())
+        .unwrap_or(true)
 }
 
 /// Load recording preferences from store
@@ -449,5 +468,26 @@ mod tests {
         });
         let prefs: RecordingPreferences = serde_json::from_value(off).unwrap();
         assert!(!prefs.remember_voices);
+    }
+
+    #[test]
+    fn auto_detect_meetings_defaults_to_true_for_old_preference_files() {
+        let old = serde_json::json!({
+            "save_folder": "/tmp/rec",
+            "auto_save": true,
+            "file_format": "mp4"
+        });
+        let prefs: RecordingPreferences = serde_json::from_value(old).unwrap();
+        assert!(prefs.auto_detect_meetings);
+        assert!(RecordingPreferences::default().auto_detect_meetings);
+
+        let off = serde_json::json!({
+            "save_folder": "/tmp/rec",
+            "auto_save": true,
+            "file_format": "mp4",
+            "auto_detect_meetings": false
+        });
+        let prefs: RecordingPreferences = serde_json::from_value(off).unwrap();
+        assert!(!prefs.auto_detect_meetings);
     }
 }

@@ -101,6 +101,7 @@ Whether you're a defense consultant, enterprise executive, legal professional, o
 - **Open Source:** Meetily is open source and free to use.
 - **Flexible AI Provider Support:** Choose from Ollama (local), Claude, Groq, OpenRouter, or use your own OpenAI-compatible endpoint.
 - **Speaker Identification (Beta):** Label who said each line, name speakers once and have their voices recognized in other meetings, and play the recording from any line. Runs locally; turn it off under Settings → Beta.
+- **Meeting Auto-Detection (macOS):** Meetily starts a recording when a meeting starts and stops it about 30 seconds after the meeting ends. Every 10 seconds, it looks for call apps (Webex, GoToMeeting, BlueJeans, Google Meet app), Zoom with an open meeting window, and meeting pages open in a browser tab (Google Meet, Zoom web, Teams web, Whereby, Gather, Around). It never stops a recording that you started yourself. This feature is on by default. To turn it off, switch off "Start recording when a meeting starts" under Settings → Recording. To read browser tab addresses, macOS asks for Automation permission.
 
 ## Installation
 

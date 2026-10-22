@@ -55,6 +55,8 @@ pub mod playback;
 pub mod state;
 pub mod summary;
 pub mod tray;
+#[cfg(target_os = "macos")]
+pub mod meeting_detector;
 pub mod utils;
 pub mod whisper_engine;
 
@@ -556,6 +558,26 @@ pub fn get_language_preference_internal() -> Option<String> {
     LANGUAGE_PREFERENCE.lock().ok().map(|lang| lang.clone())
 }
 
+/// Binds F13 (external keyboards) and Cmd+Shift+M to toggle recording.
+///
+/// Registered after plugin setup instead of on the plugin builder: a shortcut that
+/// cannot be registered there fails plugin setup and stops the app from starting.
+/// Here a failure only means that hotkey is unavailable.
+#[cfg(desktop)]
+fn register_toggle_recording_shortcuts<R: Runtime>(app: &AppHandle<R>) {
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+
+    for shortcut in [
+        Shortcut::new(None, Code::F13),
+        Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyM),
+    ] {
+        match app.global_shortcut().register(shortcut) {
+            Ok(()) => log::info!("Global hotkey {:?} → toggle recording", shortcut),
+            Err(e) => log::warn!("Global hotkey {:?} unavailable: {}", shortcut, e),
+        }
+    }
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -572,6 +594,19 @@ pub fn run() {
         }));
     }
 
+    // Global hotkeys to toggle recording without focusing the app.
+    // Uses the same toggle_recording_handler the tray menu already fires.
+    // The shortcuts themselves are registered in setup (register_toggle_recording_shortcuts).
+    #[cfg(desktop)]
+    let global_shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(|app, shortcut, event| {
+            if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                log::info!("Global hotkey pressed ({:?}): toggling recording", shortcut);
+                tray::toggle_recording_handler(app);
+            }
+        })
+        .build();
+
     builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -579,6 +614,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(global_shortcut_plugin)
         .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
@@ -636,6 +672,14 @@ pub fn run() {
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
+
+            #[cfg(desktop)]
+            register_toggle_recording_shortcuts(_app.handle());
+
+            // Auto-detect meetings (call apps, Zoom in a call, meeting tabs in
+            // browsers) and start/stop recording without user input.
+            #[cfg(target_os = "macos")]
+            meeting_detector::spawn(_app.handle().clone());
 
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");

@@ -18,6 +18,8 @@ export interface RecordingPreferences {
   identify_speakers_after_recording: boolean;
   /** Recognise voices named in one meeting in the others (Settings → Speakers) */
   remember_voices: boolean;
+  /** Start and stop recording when a meeting starts and ends (macOS); missing means on */
+  auto_detect_meetings?: boolean;
 }
 
 interface RecordingSettingsProps {
@@ -32,13 +34,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     preferred_mic_device: null,
     preferred_system_device: null,
     identify_speakers_after_recording: true,
-    remember_voices: true
+    remember_voices: true,
+    auto_detect_meetings: true
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
   const { isRecording } = useRecordingState();
   const { setSelectedDevices, betaFeatures } = useConfig();
+  // Meeting auto-detection is only built for macOS.
+  const isMacOS = typeof navigator !== 'undefined' && navigator.userAgent.includes('Mac');
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -83,6 +88,13 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
     await Analytics.track('identify_speakers_after_recording_toggled', { enabled: enabled.toString() });
+  };
+
+  const handleAutoDetectToggle = async (enabled: boolean) => {
+    const newPreferences = { ...preferences, auto_detect_meetings: enabled };
+    setPreferences(newPreferences);
+    await savePreferences(newPreferences);
+    await Analytics.track('auto_detect_meetings_toggled', { enabled: enabled.toString() });
   };
 
   const handleAutoSaveToggle = async (enabled: boolean) => {
@@ -210,6 +222,24 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           disabled={saving}
         />
       </div>
+
+      {isMacOS && (
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1">
+            <div className="font-medium">Start recording when a meeting starts</div>
+            <div className="text-sm text-gray-600">
+              Record automatically when you join a call in Zoom, Webex or a browser tab
+              (Google Meet, Teams and others), and stop when it ends. Recordings you start
+              yourself are never stopped.
+            </div>
+          </div>
+          <Switch
+            checked={preferences.auto_detect_meetings ?? true}
+            onCheckedChange={handleAutoDetectToggle}
+            disabled={saving}
+          />
+        </div>
+      )}
 
       {betaFeatures.speakerIdentification && (
         <div className="space-y-3 p-4 border rounded-lg">
