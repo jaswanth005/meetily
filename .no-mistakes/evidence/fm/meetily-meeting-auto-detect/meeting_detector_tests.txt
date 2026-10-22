@@ -1,0 +1,42 @@
+198 | pub struct AudioCapture {
+    |            ------------ field in this struct
+...
+205 |     recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+    |     ^^^^^^^^^^^^^^^^
+    |
+    = note: `AudioCapture` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   --> frontend/src-tauri/src/audio/pipeline.rs:735:5
+    |
+732 | pub struct AudioPipeline {
+    |            ------------- field in this struct
+...
+735 |     state: Arc<RecordingState>,
+    |     ^^^^^
+
+   --> frontend/src-tauri/src/audio/system_audio_commands.rs:125:25
+    |
+125 |                 assert!(device_list.len() >= 0); // Should at least not crash
+    |                         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_comparisons)]` on by default
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.25s
+     Running unittests src/lib.rs (/Users/jaswanthpogula/.no-mistakes/worktrees/64d8e76bbd08/01M5GT6WP6417MBA9E061288N4/target/debug/deps/app_lib-4cb387e7646f5cca)
+
+running 9 tests
+test meeting_detector::tests::starts_when_a_meeting_starts_and_stops_when_it_ends ... ok
+test meeting_detector::tests::does_not_restart_after_the_user_stops_it_during_the_meeting ... ok
+test meeting_detector::tests::a_single_missed_check_neither_stops_nor_restarts ... ok
+test meeting_detector::tests::starts_again_for_the_next_meeting ... ok
+test meeting_detector::tests::never_stops_a_recording_the_user_started ... ok
+test meeting_detector::tests::waits_for_a_slow_start_then_stops_it_when_the_meeting_ends ... ok
+test meeting_detector::tests::gives_up_on_a_start_that_never_happens_without_retrying ... ok
+test meeting_detector::tests::pages_that_are_not_meetings_are_ignored ... ok
+test meeting_detector::tests::meeting_urls_are_recognised ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 515 filtered out; finished in 0.00s
+
+
+[exited with code 0]
